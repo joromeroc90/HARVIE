@@ -649,14 +649,24 @@ class JarvisLive:
                 try:
                     import win32com.client
                     sapi = win32com.client.Dispatch("SAPI.SpVoice")
-                    for idx in range(sapi.GetVoices().Count):
-                        candidate = sapi.GetVoices().Item(idx)
-                        if "raul" in candidate.GetDescription().lower():
-                            sapi.Voice = candidate
-                            sapi.Rate = 0
-                            sapi.Volume = 100
-                            sapi.Speak(text)
-                            return
+                    # Prefer an English male voice so Spanish is pronounced
+                    # with an American accent, as requested by the user.
+                    preferred = ("david", "mark", "raul")
+                    selected = None
+                    for wanted in preferred:
+                        for idx in range(sapi.GetVoices().Count):
+                            candidate = sapi.GetVoices().Item(idx)
+                            if wanted in candidate.GetDescription().lower():
+                                selected = candidate
+                                break
+                        if selected is not None:
+                            break
+                    if selected is not None:
+                        sapi.Voice = selected
+                        sapi.Rate = 0
+                        sapi.Volume = 100
+                        sapi.Speak(text)
+                        return
                 except Exception:
                     pass
                 print("[Voice] No se pudo activar la voz española Raul.")
