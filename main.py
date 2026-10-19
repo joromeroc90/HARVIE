@@ -1014,6 +1014,14 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        # Local Ollama responses arrive as output_text (without
+                        # generated audio), so route them to the Windows TTS
+                        # fallback at turn completion as well.
+                        if getattr(sc, "output_text", None):
+                            txt = _clean_transcript(sc.output_text)
+                            if txt and txt != (out_buf[-1] if out_buf else ""):
+                                out_buf.append(txt)
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
