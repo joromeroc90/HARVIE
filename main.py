@@ -621,6 +621,11 @@ class JarvisLive:
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
+        # Ollama returns text only; always speak direct notifications locally.
+        if self.session.__class__.__name__ == "LocalLiveSession":
+            threading.Thread(target=self._speak_local_voice,
+                             args=(text,), daemon=True).start()
+            return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
