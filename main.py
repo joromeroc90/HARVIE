@@ -564,6 +564,8 @@ class JarvisLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._stt_queue = queue.Queue(maxsize=80)
         self._stt_model = None
+        self._tts_engine = None
+        self._tts_lock = threading.Lock()
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -630,8 +632,11 @@ class JarvisLive:
     def _speak_local_voice(self, text: str) -> None:
         """Speak text with the installed Windows voice when the local model returns text."""
         try:
-            import pyttsx3
-            engine = pyttsx3.init()
+            with self._tts_lock:
+                import pyttsx3
+                if self._tts_engine is None:
+                    self._tts_engine = pyttsx3.init()
+                engine = self._tts_engine
             voices = engine.getProperty("voices") or []
             male_voice = None
             for voice in voices:
@@ -670,8 +675,9 @@ class JarvisLive:
                 print("[Voice] No se pudo activar la voz española Raul.")
             engine.setProperty("rate", 165)
             engine.setProperty("volume", 1.0)
-            engine.say(text)
-            engine.runAndWait()
+            with self._tts_lock:
+                engine.say(text)
+                engine.runAndWait()
         except Exception as exc:
             print(f"[Voice] Local voice unavailable: {exc}")
 

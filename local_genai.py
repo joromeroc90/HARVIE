@@ -131,7 +131,9 @@ class LocalLiveSession:
                 "http://127.0.0.1:11434/api/chat",
                 data=json.dumps({"model": "llama3.2", "messages": messages,
                                  "stream": False,
-                                 "options": {"num_predict": 160, "temperature": 0.35}}).encode("utf-8"),
+                                 "keep_alive": "10m",
+                                 "options": {"num_ctx": 2048, "num_predict": 160,
+                                             "temperature": 0.35}}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=120) as response:
