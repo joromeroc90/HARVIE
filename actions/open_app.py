@@ -139,6 +139,18 @@ def _launch_windows(app_name: str) -> bool:
          without a command line for anything to be appended to.
       3. the Start Menu, typed like a person would.
     """
+    folded = _fold_name(app_name).replace(" ", "")
+    # Microsoft Teams (new) is an AppX package and may not expose an .exe or
+    # Start Menu shortcut. Launch its registered Windows app identity directly.
+    if folded in {"teams", "microsoftteams", "msteams"}:
+        for target in ("shell:AppsFolder\\MicrosoftTeams_8wekyb3d8bbwe!MSTeams",
+                       "msteams:"):
+            try:
+                os.startfile(target)
+                return True
+            except Exception:
+                pass
+
     shortcut = _start_menu_shortcut(app_name)
     if shortcut:
         try:
