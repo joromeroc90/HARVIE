@@ -400,7 +400,9 @@ class _SysMetrics:
             }
 
 
-_metrics = _SysMetrics()
+# Do not inspect host resource metrics at startup. The system_status tool can
+# still collect them only when the user explicitly asks for that information.
+_metrics = None
 
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
@@ -430,7 +432,7 @@ class HudCanvas(QWidget):
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
         except Exception:
-            self.hud_style = "face"
+            self.hud_style = "core"
         self._core_phase = 0.0
 
         self._tick       = 0
@@ -4515,7 +4517,6 @@ class MainWindow(QMainWindow):
         # Metric update timer
         self._metric_tmr = QTimer(self)
         self._metric_tmr.timeout.connect(self._update_metrics)
-        self._metric_tmr.start(2000)
         self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)
@@ -5175,6 +5176,15 @@ class MainWindow(QMainWindow):
         self._fit_video()
 
     def _update_metrics(self):
+        # The HUD must not read CPU, RAM, network, GPU, temperature, uptime or
+        # process count unless the user explicitly requests system status.
+        for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
+                    self._bar_gpu, self._bar_tmp]:
+            bar.set_value(0, "N/A")
+        self._uptime_lbl.setText("UP  --:--")
+        self._proc_lbl.setText("PROC  --")
+        return
+
         snap = _metrics.snapshot()
 
         # CPU
