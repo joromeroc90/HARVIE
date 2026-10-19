@@ -84,6 +84,7 @@ class LocalLiveSession:
         self.model = model
         self.config = config
         self._receive_queue = asyncio.Queue()
+        self._history = []
 
     async def __aenter__(self):
         return self
@@ -97,9 +98,35 @@ class LocalLiveSession:
             yield response
 
     async def send_client_content(self, turns: dict, turn_complete: bool = False):
+        text_parts = [p.get("text", "") for p in (turns or {}).get("parts", [])
+                      if isinstance(p, dict) and p.get("text")]
+        user_text = "\n".join(text_parts).strip()
+        if not user_text:
+            return
+        self._history.append({"role": "user", "content": user_text})
+        system = getattr(self.config, "system_instruction", "") or ""
+        messages = ([{"role": "system", "content": str(system)}]
+                    if system else []) + self._history[-12:]
+
+        def _ask_ollama():
+            req = urllib.request.Request(
+                "http://127.0.0.1:11434/api/chat",
+                data=json.dumps({"model": "llama3.2", "messages": messages,
+                                 "stream": False}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                return data.get("message", {}).get("content", "No recibí una respuesta.")
+
+        try:
+            answer = await asyncio.to_thread(_ask_ollama)
+        except Exception as exc:
+            answer = f"No pude conectar con el modelo local: {exc}"
+        self._history.append({"role": "assistant", "content": answer})
         await self._receive_queue.put(_LiveResponse(
             server_content=_ServerContent(
-                output_text="Received text input locally.",
+                output_text=answer,
                 turn_complete=True
             )
         ))
@@ -133,7 +160,7 @@ class _Models:
         url = "http://127.0.0.1:11434/api/generate"
         
         payload = {
-            "model": "llama3", # Ensure this matches your downloaded local model
+            "model": "llama3.2",
             "prompt": str(contents),
             "stream": False
         }
