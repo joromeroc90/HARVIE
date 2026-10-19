@@ -635,11 +635,16 @@ class JarvisLive:
             import pyttsx3
             engine = pyttsx3.init()
             voices = engine.getProperty("voices") or []
+            male_voice = None
             for voice in voices:
                 desc = f"{getattr(voice, 'name', '')} {getattr(voice, 'id', '')}".lower()
-                if "sabina" in desc or "spanish" in desc or "es-" in desc:
-                    engine.setProperty("voice", voice.id)
+                if any(name in desc for name in ("david", "mark", "jorge", "george", "male")):
+                    male_voice = voice
                     break
+            if male_voice is not None:
+                engine.setProperty("voice", male_voice.id)
+            else:
+                print("[Voice] No hay voz masculina SAPI instalada; instala una voz masculina de Windows.")
             engine.setProperty("rate", 155)
             engine.setProperty("volume", 1.0)
             engine.say(text)
