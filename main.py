@@ -28,6 +28,7 @@ import time
 import json
 import sys
 import traceback
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -99,6 +100,15 @@ def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
     return text.strip()
+
+
+def _is_harvie_greeting(text: str) -> bool:
+    """Detect the explicit wake greeting without sending it to a remote service."""
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"[^a-z0-9 ]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return bool(re.fullmatch(r"(?:hola|halo|hello) harvie", normalized))
 
 TOOL_DECLARATIONS = [
     {
@@ -546,6 +556,7 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._turn_had_audio       = False  # local Ollama may return text without audio
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -618,6 +629,24 @@ class JarvisLive:
             self._loop
         )
 
+    def _speak_local_voice(self, text: str) -> None:
+        """Speak text with the installed Windows voice when the local model returns text."""
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            voices = engine.getProperty("voices") or []
+            for voice in voices:
+                desc = f"{getattr(voice, 'name', '')} {getattr(voice, 'id', '')}".lower()
+                if "sabina" in desc or "spanish" in desc or "es-" in desc:
+                    engine.setProperty("voice", voice.id)
+                    break
+            engine.setProperty("rate", 155)
+            engine.setProperty("volume", 1.0)
+            engine.say(text)
+            engine.runAndWait()
+        except Exception as exc:
+            print(f"[Voice] Local voice unavailable: {exc}")
+
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
@@ -648,10 +677,9 @@ class JarvisLive:
         )
 
         # Identity injection — overrides any hardcoded name in prompt.txt
-        _addr = (f"ADDRESS: Always call the user '{_user_name}'."
+        _addr = (f"ADDRESS: Always call the user 'jefe' (configured name: {_user_name})."
                  if _user_name
-                 else "ADDRESS: When speaking Turkish → always say \"efendim\". "
-                      "When speaking English → say \"sir\". Never mix languages.")
+                 else "ADDRESS: Always call the user 'jefe' in Spanish. Never say sir or efendim.")
         identity_ctx = (
             f"[IDENTITY]\n"
             f"Your name is {self._asst_name}. "
@@ -887,6 +915,7 @@ class JarvisLive:
                 async for response in self.session.receive():
 
                     if response.data:
+                        self._turn_had_audio = True
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
@@ -934,11 +963,21 @@ class JarvisLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                if _is_harvie_greeting(full_in) and self.session:
+                                    await self.session.send_client_content(
+                                        turns={"parts": [{"text":
+                                            "The user greeted you with the wake phrase. "
+                                            "Reply exactly: Hola, jefe"}]},
+                                        turn_complete=True,
+                                    )
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
+                                if not self._turn_had_audio:
+                                    threading.Thread(target=self._speak_local_voice,
+                                                     args=(full_out,), daemon=True).start()
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -946,6 +985,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
+                            self._turn_had_audio = False
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
