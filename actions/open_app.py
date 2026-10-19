@@ -40,6 +40,8 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
+from pathlib import Path
 
 from core import appidentity, outcome
 from core.lazyimport import LazyModule, installed
@@ -59,6 +61,41 @@ _LAUNCH_TIMEOUT = 12.0
 # name and presses Enter, which is what a person does, and works in every
 # language the desktop is running in.
 _SEARCH_SETTLE = 0.8
+
+
+def _fold_name(value: str) -> str:
+    """Compare spoken names without accents, punctuation or case."""
+    raw = unicodedata.normalize("NFKD", value.lower())
+    return "".join(c for c in raw if not unicodedata.combining(c))
+
+
+def _start_menu_shortcut(app_name: str) -> str | None:
+    """Return the matching Windows Start Menu shortcut path, if installed."""
+    if _SYSTEM != "Windows":
+        return None
+    wanted = _fold_name(Path(app_name).stem).replace(" ", "")
+    if not wanted:
+        return None
+    roots = (
+        Path(os.environ.get("PROGRAMDATA", "C:/ProgramData"))
+        / "Microsoft/Windows/Start Menu/Programs",
+        Path(os.environ.get("APPDATA", ""))
+        / "Microsoft/Windows/Start Menu/Programs",
+    )
+    matches = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for shortcut in root.rglob("*.lnk"):
+            label = _fold_name(shortcut.stem).replace(" ", "")
+            if label == wanted or wanted in label or label in wanted:
+                matches.append(shortcut)
+    if not matches:
+        return None
+    # Prefer an exact label and the shortest path when folders contain aliases.
+    matches.sort(key=lambda p: (0 if _fold_name(p.stem).replace(" ", "") == wanted else 1,
+                               len(str(p))))
+    return str(matches[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,6 +139,14 @@ def _launch_windows(app_name: str) -> bool:
          without a command line for anything to be appended to.
       3. the Start Menu, typed like a person would.
     """
+    shortcut = _start_menu_shortcut(app_name)
+    if shortcut:
+        try:
+            os.startfile(shortcut)
+            return True
+        except Exception as exc:
+            print(f"[open_app] Start Menu shortcut failed for {shortcut!r}: {exc}")
+
     resolved = shutil.which(app_name)
     if resolved:
         try:
