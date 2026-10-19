@@ -151,6 +151,18 @@ def _launch_windows(app_name: str) -> bool:
             except Exception:
                 pass
 
+    # The installed modern Outlook is a separate AppX application from
+    # Outlook (classic). Open its AUMID directly so Windows Search is never
+    # focused and the assistant remains usable while it starts in the background.
+    if folded in {"outlook", "microsoftoutlook", "outlookforwindows"}:
+        target = ("shell:AppsFolder\\Microsoft.OutlookForWindows_8wekyb3d8bbwe!"
+                  "Microsoft.OutlookforWindows")
+        try:
+            os.startfile(target)
+            return True
+        except Exception as exc:
+            print(f"[open_app] Modern Outlook launch failed: {exc}")
+
     shortcut = _start_menu_shortcut(app_name)
     if shortcut:
         try:
