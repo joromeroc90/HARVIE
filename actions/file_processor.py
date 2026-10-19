@@ -25,19 +25,24 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
+# Model choice, timeout and fallback ladder all live in core/gemini.py.
+from core import gemini
+
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
 
-def _gemini_client():
-    import local_genai as genai
-    _c = genai.Client(api_key=_get_api_key())
-
+def _gemini_client(tier: str = gemini.SMART):
+    """Summarising documents and reading images — the reasoning tier, with a
+    long deadline because the input can be a whole file."""
     class _W:
         def generate_content(self, contents):
-            return _c.models.generate_content(model="gemini-2.5-flash", contents=contents)
+            resp = gemini.call(contents, tier=tier, timeout_ms=90000)
+            if resp is None:
+                raise RuntimeError("every Gemini model on the ladder failed")
+            return resp
 
     return _W()
 
@@ -462,7 +467,7 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
             try:
                 result = subprocess.run(
                     ["python", str(path)],
-                    capture_output=True, text=True, timeout=30
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
                 )
                 out = result.stdout or result.stderr
                 return f"Output:\n{out[:2000]}" if out else "No output."
@@ -597,7 +602,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             result = subprocess.run(
                 ["ffprobe", "-v", "quiet", "-print_format", "json",
                  "-show_format", "-show_streams", str(path)],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
             )
             data     = json.loads(result.stdout)
             fmt      = data.get("format", {})
@@ -776,6 +781,9 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
 
+from core import outcome
+
+
 def file_processor(parameters: dict, player=None, speak=None) -> str:
     file_path_str = parameters.get("file_path", "").strip()
     if not file_path_str:
@@ -829,8 +837,102 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     try:
         result = handler(path, action, params, speak)
-        return result or "Done."
+        # A document's contents are not the user speaking. A PDF, a spreadsheet
+        # or a text file can carry anything its author put there, including a
+        # sentence addressed to whatever reads it — so what comes out of one
+        # goes to the model marked as data. See core/outcome.untrusted().
+        return outcome.untrusted(f"file:{path.suffix.lstrip('.') or 'text'}",
+                                 result) if result else outcome.done(
+            "file_processor", file=path.name, note="nothing to report")
     except Exception as e:
         import traceback
         traceback.print_exc()
         return f"Processing failed: {e}"
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "file_processor",
+    "description": "Processes any file that the user has uploaded or dropped onto the interface. Use this when the user refers to an uploaded file and wants an action on it. Supports: images (describe/ocr/resize/compress/convert), PDFs (summarize/extract_text/to_word), Word docs & text files (summarize/fix/reformat/translate), CSV/Excel (analyze/stats/filter/sort/convert), JSON/XML (validate/format/analyze), code files (explain/review/fix/optimize/run/document/test), audio (transcribe/trim/convert/info), video (trim/extract_audio/extract_frame/compress/transcribe/info), archives (list/extract), presentations (summarize/extract_text). ALWAYS call this tool when a file has been uploaded and the user gives a command about it. If the user's command is ambiguous, pick the most logical action for that file type.",
+    # Used in place of `description` only when a small model is on a tool
+    # budget - Gemini still gets the full text. See providers/schema.py.
+    "brief": (
+        "Reads a local file and answers questions about it or summarises it. Put the path in 'path' and what is wanted in 'query'."
+    ),
+    "tier": "core",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "file_path": {
+                "type": "STRING",
+                "description": "Full path to the uploaded file. Leave empty to use the currently uploaded file."
+            },
+            "action": {
+                "type": "STRING",
+                "description": "What to do with the file. Examples by type:\nimage: describe | ocr | resize | compress | convert | info\npdf: summarize | extract_text | to_word | info\ndocx/txt: summarize | fix | reformat | translate_hint | word_count | to_bullet\ncsv/excel: analyze | stats | filter | sort | convert | info\njson: validate | format | analyze | to_csv\ncode: explain | review | fix | optimize | run | document | test\naudio: transcribe | trim | convert | info\nvideo: trim | extract_audio | extract_frame | compress | transcribe | info | convert\narchive: list | extract\npptx: summarize | extract_text | analyze"
+            },
+            "instruction": {
+                "type": "STRING",
+                "description": "Free-form instruction if action doesn't cover it. E.g. 'translate this to Turkish', 'find all email addresses'"
+            },
+            "format": {
+                "type": "STRING",
+                "description": "Target format for conversion. E.g. 'mp3', 'pdf', 'csv', 'png'"
+            },
+            "width": {
+                "type": "INTEGER",
+                "description": "Target width for image resize"
+            },
+            "height": {
+                "type": "INTEGER",
+                "description": "Target height for image resize"
+            },
+            "scale": {
+                "type": "NUMBER",
+                "description": "Scale factor for image resize (e.g. 0.5)"
+            },
+            "quality": {
+                "type": "INTEGER",
+                "description": "Quality 1-100 for image/video compress"
+            },
+            "start": {
+                "type": "STRING",
+                "description": "Start time for trim: seconds or HH:MM:SS"
+            },
+            "end": {
+                "type": "STRING",
+                "description": "End time for trim: seconds or HH:MM:SS"
+            },
+            "timestamp": {
+                "type": "STRING",
+                "description": "Timestamp for video frame extraction HH:MM:SS"
+            },
+            "column": {
+                "type": "STRING",
+                "description": "Column name for CSV filter/sort"
+            },
+            "value": {
+                "type": "STRING",
+                "description": "Filter value for CSV filter"
+            },
+            "condition": {
+                "type": "STRING",
+                "description": "Filter condition: equals|contains|gt|lt"
+            },
+            "ascending": {
+                "type": "BOOLEAN",
+                "description": "Sort order for CSV sort (default: true)"
+            },
+            "save": {
+                "type": "BOOLEAN",
+                "description": "Save result to file (default: true)"
+            },
+            "destination": {
+                "type": "STRING",
+                "description": "Output folder for archive extract"
+            }
+        },
+        "required": []
+    },
+    "handler": file_processor,
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib.util
 import os
 import platform
 import shutil
@@ -10,15 +11,76 @@ import subprocess
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from playwright.async_api import (
-    async_playwright,
-    BrowserContext,
-    Page,
-    Playwright,
-    TimeoutError as PlaywrightTimeout,
-)
+from core import appidentity, outcome
+
+# Importing playwright cost 198 ms at every launch, paid by action discovery
+# whether or not a browser was ever opened. It is the second-largest import in
+# the project after pyautogui, and together the two were 78% of all module
+# import time on the boot path.
+#
+# WHY THIS STILL RAISES WHEN PLAYWRIGHT IS MISSING
+#     The eager import had a second job nobody wrote down: when playwright was
+#     absent this module failed to load, action_loader dropped it, and the model
+#     was never offered a browser tool it could not serve. Deferring the import
+#     without keeping that would declare `browser_control` on a machine that
+#     cannot run it — the model would call it, get an exception, and describe a
+#     page it never opened. Exactly the failure mode this project spent Mark LVI
+#     removing from local engines.
+#
+#     So the check stays at module scope and still stops the module loading; it
+#     just asks find_spec instead of executing the package. 1 ms instead of 198,
+#     same outcome, and a sentence that says what to install.
+if importlib.util.find_spec("playwright") is None:      # pragma: no cover
+    raise ImportError(
+        "browser_control needs playwright, which is not installed. "
+        "Run: pip install playwright  &&  playwright install chromium"
+    )
+
+# Annotations only — `from __future__ import annotations` above makes every one
+# of them a string, so these names are never looked up at runtime and cost
+# nothing outside a type checker.
+if TYPE_CHECKING:
+    from playwright.async_api import BrowserContext, Page, Playwright
+
+# WHY THIS FILE DOES NOT USE core/lazyimport.py's LazyModule LIKE THE OTHERS
+#     Every other deferral in this project stands a proxy in for a whole module,
+#     because the call sites say `pyautogui.press(...)` and a proxy answers that
+#     the same way the module would. What this file needs are two SYMBOLS out of
+#     a module: a factory function, and an exception class used in `except`.
+#
+#     `except` will not take a proxy. It requires a real class inheriting from
+#     BaseException, checked by the interpreter at the moment the exception is
+#     raised, and a LazyModule there raises TypeError instead of catching
+#     anything — the original error then disappears underneath a complaint about
+#     the except clause. So these two are bound as real globals instead.
+#
+# PlaywrightTimeout starts as a private class that is never raised, so an
+# `except PlaywrightTimeout:` somehow reached before a session exists catches
+# nothing rather than failing that same way.
+class _PlaywrightNotLoaded(Exception):
+    """Placeholder exception — declared so `except` clauses stay valid, and
+    deliberately never raised anywhere."""
+
+
+async_playwright = None
+PlaywrightTimeout: type[BaseException] = _PlaywrightNotLoaded
+
+
+def _load_playwright() -> None:
+    """Import playwright and bind the two runtime symbols. Idempotent."""
+    global async_playwright, PlaywrightTimeout
+    if async_playwright is not None:
+        return
+    from playwright.async_api import (          # noqa: PLC0415 — deliberate
+        async_playwright as _ap,
+        TimeoutError as _timeout,
+    )
+    async_playwright = _ap
+    PlaywrightTimeout = _timeout
+
+
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -327,7 +389,7 @@ def _detect_default_browser() -> str:
                 ["defaults", "read",
                  "com.apple.LaunchServices/com.apple.launchservices.secure",
                  "LSHandlers"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             ).stdout.lower()
             for kw in ("firefox", "opera", "brave", "vivaldi", "safari", "chrome", "edge"):
                 if kw in out:
@@ -335,7 +397,7 @@ def _detect_default_browser() -> str:
         elif _OS == "Linux":
             out = subprocess.run(
                 ["xdg-settings", "get", "default-web-browser"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             ).stdout.lower()
             for kw in ("firefox", "opera", "brave", "vivaldi", "chrome", "edge"):
                 if kw in out:
@@ -369,12 +431,12 @@ _WIN_EXE_HINTS: dict[str, str] = {"chrome": "chrome", "edge": "msedge"}
 
 def _open_native(url: str, browser_name: Optional[str]) -> str:
     """
-    Kullanıcının GERÇEK tarayıcısını normal şekilde açar — kendi profili,
-    giriş yapılmış hesapları ve eklentileriyle. Otomasyon bağlanmaz, bu yüzden
-    about:blank sekmesi veya boş profil ASLA görünmez.
-    url boş ise tarayıcı URL'siz başlatılır (kendi açılış sayfası /
-    oturum geri yükleme ile) — tıpkı kullanıcının kendisi açmış gibi.
-    Windows / macOS / Linux üçünde de çalışır.
+    Opens the user's REAL browser normally — with their own profile,
+    logged-in accounts and extensions. No automation attaches, so an
+    about:blank tab or a blank profile NEVER shows up.
+    If url is empty the browser starts with no URL (its own start page /
+    session restore) — exactly as if the user had opened it themselves.
+    Works on all three of Windows / macOS / Linux.
     """
     url = _normalize_url(url) if url and url.strip() else ""
     if url == "about:blank":
@@ -384,7 +446,7 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
     if browser_name:
         name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
     elif not url:
-        # URL yok → sadece pencere açılacak; varsayılan tarayıcının exe'si gerekir
+        # No URL → only a window will open; needs the default browser's exe
         name = _detect_default_browser()
 
     # Specific browser → launch its own executable, exactly like the user would.
@@ -418,7 +480,9 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
         print(f"[Browser] '{name}' not found — falling back to default browser.")
 
     if not url:
-        return "Could not find a browser to open."
+        return outcome.failed(
+            "browser_control",
+            "no browser was found and no address was given to open")
 
     # Default browser via the OS — exactly like the user clicking a link.
     try:
@@ -431,20 +495,38 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
                 ["xdg-open", url],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-        return f"Opened in your default browser: {url}"
+        # HANDED TO THE OPERATING SYSTEM, NOT CONFIRMED.
+        #
+        # os.startfile / open / xdg-open all return as soon as the request is
+        # accepted. None of them waits for a browser, and none reports whether
+        # the page loaded — the same gap that made open_app say "Opened
+        # Spotify." off the back of a shell starting. Unlike the playwright
+        # path above there is no page object here to read a url from, so this
+        # says what it actually knows.
+        return outcome.unverified(
+            "browser_control",
+            "the address was handed to the system's default browser, which "
+            "does not report back - the page is not confirmed open",
+            url=url)
     except Exception:
         try:
             if webbrowser.open(url):
-                return f"Opened in your default browser: {url}"
+                return outcome.unverified(
+                    "browser_control",
+                    "the address was handed to the default browser, which does "
+                    "not report back - the page is not confirmed open",
+                    url=url)
         except Exception:
             pass
-        return f"Could not open a browser for: {url}"
+        return outcome.failed(
+            "browser_control",
+            "no browser on this system could be opened", url=url)
 
 
 class _BrowserSession:
     """
-    Bir tarayıcı örneği için tam oturum.
-    Tüm tarayıcılar launch_persistent_context ile gerçek profil üzerinde açılır.
+    A full session for one browser instance.
+    All browsers open on the real profile via launch_persistent_context.
     """
 
     def __init__(self, browser_name: str):
@@ -458,6 +540,11 @@ class _BrowserSession:
         self._pw:      Playwright     | None = None
         self._context: BrowserContext | None = None
         self._page:    Page           | None = None
+        # "real" when the user's own browser profile was opened, "separate"
+        # when their browser was already running and a private automation
+        # profile had to be used instead. The difference is every sign-in they
+        # have, so it is reported rather than only printed.
+        self.profile_kind: str = ""
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -478,6 +565,10 @@ class _BrowserSession:
         self._loop.run_forever()
 
     async def _async_init(self):
+        # The one door into a live session: nothing in this class reaches
+        # async_playwright or PlaywrightTimeout without coming through here
+        # first, so binding them at this point is enough for the whole file.
+        _load_playwright()
         self._pw = await async_playwright().start()
 
     def run(self, coro, timeout: int = 60) -> str:
@@ -505,9 +596,9 @@ class _BrowserSession:
 
     async def _adopt_page(self) -> Page:
         """
-        launch_persistent_context zaten bir başlangıç sekmesi açar.
-        Yeni bir boş sekme (about:blank) açmak yerine o sekmeyi devralır —
-        böylece kullanıcı fazladan boş sekme görmez.
+        launch_persistent_context already opens a starting tab.
+        Instead of opening a new blank tab (about:blank), it adopts that tab —
+        so the user never sees an extra blank tab.
         """
         await asyncio.sleep(0.3)
         pages = self._context.pages
@@ -515,8 +606,8 @@ class _BrowserSession:
 
     async def _launch(self):
         """
-        Tarayıcıyı gerçek kullanıcı profiliyle başlatır.
-        Context zaten açıksa hiçbir şey yapmaz.
+        Launches the browser with the real user profile.
+        Does nothing if the context is already open.
         """
         if self._context is not None:
             return
@@ -599,18 +690,39 @@ class _BrowserSession:
             + (f" @ {exe}" if exe else "")
         )
 
-        try:
-            self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
-            self._page = await self._adopt_page()
-            print(f"[Browser] ✅ Launched [{label}] profile={profile}")
-            return
-        except Exception as e:
-            print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
+        # ASK FIRST, INSTEAD OF WAITING 25 SECONDS TO BE TOLD.
+        #
+        # A Chromium profile can only be open once. If the user already has the
+        # browser running — which is the normal state of a browser — then
+        # launch_persistent_context on their real profile cannot succeed, and
+        # the way it fails is by sitting on the timeout above before raising.
+        # Every "open this page" then cost twenty-five seconds of nothing
+        # before the fallback even started, and the fallback is a profile with
+        # none of their sign-ins in it.
+        #
+        # Whether the browser is running is a question the process table
+        # answers in milliseconds, and core/appidentity was already built to
+        # ask it. Knowing up front turns a long silence into an immediate,
+        # explainable outcome.
+        already = appidentity.running(self.browser_name)
+        if already:
+            print(f"[Browser] {self.browser_name} is already running "
+                  f"({len(already)} processes) — its profile is locked, so the "
+                  f"separate automation profile will be used.")
+        else:
+            try:
+                self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
+                self._page = await self._adopt_page()
+                self.profile_kind = "real"
+                print(f"[Browser] ✅ Launched [{label}] profile={profile}")
+                return
+            except Exception as e:
+                print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
 
-        # Gerçek profil açılamadı (tarayıcı zaten açık / kilitli profil / yeni
-        # Chrome sürümleri otomasyonla gerçek profili engelliyor). Kalıcı
-        # JARVIS otomasyon profiline geçilir — buraya bir kez giriş yapılan
-        # hesaplar sonraki oturumlarda da açık kalır.
+        # The real profile could not be opened (browser already open / locked
+        # profile / newer Chrome versions block the real profile under
+        # automation). Fall back to a persistent JARVIS automation profile —
+        # accounts logged in here once stay logged in on later sessions too.
         jarvis_profile = str(Path.home() / ".jarvis_profiles" / self.browser_name)
         Path(jarvis_profile).mkdir(parents=True, exist_ok=True)
         print(f"[Browser] Retrying with JARVIS profile: {jarvis_profile}")
@@ -618,6 +730,7 @@ class _BrowserSession:
         try:
             self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
             self._page = await self._adopt_page()
+            self.profile_kind = "separate"
             print(f"[Browser] ✅ Launched [{label}] with JARVIS profile "
                   f"(sign-ins persist across sessions)")
         except Exception as e2:
@@ -661,8 +774,33 @@ class _BrowserSession:
                 print(f"[Browser] New-tab retry failed: {e}")
 
         if result_url and result_url not in ("about:blank", "", None):
-            return f"Opened: {result_url}"
-        return f"Could not open: {url}"
+            # Verified, and cheaply: this is the page's OWN url read back after
+            # navigation, not the one we asked for. A redirect, a login wall or
+            # a captive portal all show up here as a different address, which
+            # is exactly what the user needs to hear about.
+            #
+            # The profile is reported for the same reason. When the user's
+            # browser was already running its profile is locked, so the page
+            # opens in a separate one where they are signed in to nothing —
+            # and a Gmail that asks them to log in looks like a broken
+            # assistant unless somebody says why.
+            if self.profile_kind == "separate":
+                return outcome.unverified(
+                    "browser_control",
+                    f"the page opened at {result_url}, but "
+                    f"{self.browser_name} was already running so its profile "
+                    f"was locked - this window uses a separate profile where "
+                    f"the user is NOT signed in to anything. Closing "
+                    f"{self.browser_name} first would let their own profile be "
+                    f"used",
+                    opened=result_url, profile="separate")
+            return outcome.done("browser_control", opened=result_url,
+                                profile=self.profile_kind or "real",
+                                verified=True)
+        return outcome.failed(
+            "browser_control",
+            "the page stayed blank - the address may be wrong, or the site may "
+            "not have answered", url=url)
 
     async def search(self, query: str, engine: str = "google") -> str:
         base = _SEARCH_ENGINES.get(engine.lower(), _SEARCH_ENGINES["google"])
@@ -677,9 +815,13 @@ class _BrowserSession:
             if selector:
                 await page.click(selector, timeout=8_000)
                 return f"Clicked selector: {selector}"
-            return "No selector or text provided."
+            return outcome.failed("browser_control",
+                                  "no element was named to click")
         except PlaywrightTimeout:
-            return "Element not found (timeout)."
+            return outcome.failed(
+                "browser_control",
+                "no element matching that appeared on the page in time",
+                selector=selector or text)
         except Exception as e:
             return f"Click error: {e}"
 
@@ -691,7 +833,9 @@ class _BrowserSession:
             if clear_first:
                 await el.clear()
             await el.type(text, delay=50)
-            return "Text typed."
+            # playwright raises when the field is not there, so reaching this
+            # line means the text went into a real input.
+            return outcome.done("browser_control", typed=True, verified=True)
         except Exception as e:
             return f"Type error: {e}"
 
@@ -840,7 +984,7 @@ class _BrowserSession:
         return f"{self.browser_name} closed."
 
 class _SessionRegistry:
-    """Tüm aktif tarayıcı oturumlarını yönetir."""
+    """Manages all active browser sessions."""
 
     def __init__(self):
         self._sessions:        dict[str, _BrowserSession] = {}
@@ -849,7 +993,7 @@ class _SessionRegistry:
         self._last_native_url: str                        = ""
 
     def has(self, browser_name: str | None = None) -> bool:
-        """Bu tarayıcı için (veya hiç) aktif bir otomasyon oturumu var mı?"""
+        """Is there an active automation session for this browser (or any)?"""
         with self._lock:
             if not browser_name:
                 return bool(self._sessions)
@@ -860,7 +1004,7 @@ class _SessionRegistry:
         self._last_native_url = url
 
     def pop_native_url(self) -> str:
-        """Son native açılan URL'yi bir kez döndürür (tekrarı önlemek için tüketilir)."""
+        """Returns the last natively-opened URL once (consumed to avoid repeats)."""
         url, self._last_native_url = self._last_native_url, ""
         return url
 
@@ -956,12 +1100,12 @@ def browser_control(
         _log(player, result)
         return result
 
-    # ── Gezinme HER ZAMAN native ─────────────────────────────────────────────
-    # go_to / search / new_tab siteyi kullanıcının kendi tarayıcısında açar —
-    # kendi profili, giriş yapılmış hesapları ve açılış sayfasıyla; tıpkı
-    # kullanıcının kendisi açmış gibi. about:blank'li kontrollü pencere burada
-    # asla açılmaz. Tek istisna: hâlihazırda süren bir otomasyon akışı varsa
-    # gezinme o pencerede devam eder (çok adımlı görevler bölünmesin diye).
+    # ── Navigation is ALWAYS native ──────────────────────────────────────────
+    # go_to / search / new_tab open the site in the user's own browser —
+    # their own profile, logged-in accounts and start page; exactly as if the
+    # user had opened it themselves. A controlled window with about:blank never
+    # opens here. The only exception: if an automation flow is already running,
+    # navigation continues in that window (so multi-step tasks aren't split).
     if action in ("go_to", "search", "new_tab"):
         if _registry.has(browser):
             sess = _registry.get(browser)
@@ -993,10 +1137,10 @@ def browser_control(
         _log(player, result)
         return result
 
-    # ── Etkileşimli aksiyonlar (tıklama/yazma/okuma…) ────────────────────────
-    # Bunlar fiziksel olarak kontrol edilebilir bir tarayıcı gerektirir;
-    # yalnızca burada otomasyon penceresi açılır ve açılır açılmaz kullanıcının
-    # son gezindiği sayfaya gider — boş sayfada beklemez.
+    # ── Interactive actions (click/type/read…) ───────────────────────────────
+    # These require a physically controllable browser; the automation window
+    # only opens here, and as soon as it opens it goes to the user's last
+    # navigated page — it doesn't sit on a blank page.
     try:
         sess = _registry.get(browser)
     except Exception as e:
@@ -1057,4 +1201,93 @@ def _log(player, text: str):
     short = str(text)[:80]
     print(f"[Browser] {short}")
     if player:
-        player.write_log(f"[browser] {short[:60]}")
+        print(f"[Browser] {short[:80]}")          # terminal, not the HUD
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "browser_control",
+    "description": (
+        "Controls the web browser: open an address, search, click, type, "
+        "scroll, read the page, manage tabs, go back and forward. "
+        "THIS TOOL OPENS THE BROWSER ITSELF. Never call open_app for the "
+        "browser first - doing both launches it twice, the second copy on a "
+        "different profile with none of the user's sign-ins. 'Open Chrome and "
+        "go to YouTube' is ONE call to this tool. "
+        "Read the status it returns. 'done' means it was confirmed - for an "
+        "open, the url reported back is the page's OWN address, so if it "
+        "differs from what was asked for the site redirected and the user "
+        "should be told. 'unverified' means the address was handed to the "
+        "system's default browser, which never reports back: say it was opened "
+        "but not confirmed, never that the page is up. 'failed' means nothing "
+        "happened."
+    ),
+    "brief": (
+        "Controls the web browser: open a URL, navigate, click, read the page."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+            },
+            "browser": {
+                "type": "STRING",
+                "description": "Target browser: chrome | edge | firefox | opera | operagx | brave | vivaldi | safari. Omit to use the currently active browser."
+            },
+            "url": {
+                "type": "STRING",
+                "description": "URL for go_to / new_tab action"
+            },
+            "query": {
+                "type": "STRING",
+                "description": "Search query for search action"
+            },
+            "engine": {
+                "type": "STRING",
+                "description": "Search engine: google | bing | duckduckgo | yandex (default: google)"
+            },
+            "selector": {
+                "type": "STRING",
+                "description": "CSS selector for click/type"
+            },
+            "text": {
+                "type": "STRING",
+                "description": "Text to click or type"
+            },
+            "description": {
+                "type": "STRING",
+                "description": "Element description for smart_click/smart_type"
+            },
+            "direction": {
+                "type": "STRING",
+                "description": "up | down for scroll"
+            },
+            "amount": {
+                "type": "INTEGER",
+                "description": "Scroll amount in pixels (default: 500)"
+            },
+            "key": {
+                "type": "STRING",
+                "description": "Key name for press action (e.g. Enter, Escape, F5)"
+            },
+            "path": {
+                "type": "STRING",
+                "description": "Save path for screenshot"
+            },
+            "incognito": {
+                "type": "BOOLEAN",
+                "description": "Open in private/incognito mode"
+            },
+            "clear_first": {
+                "type": "BOOLEAN",
+                "description": "Clear field before typing (default: true)"
+            }
+        },
+        "required": [
+            "action"
+        ]
+    },
+    "handler": browser_control,
+}

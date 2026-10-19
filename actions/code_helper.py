@@ -15,7 +15,10 @@ BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-2.5-flash"
+# Model choice lives in core/gemini.py, and so does the timeout and the
+# fallback ladder. Writing a model name here is what left this file hanging
+# forever whenever that one alias was unwell.
+from core import gemini
 
 
 def _get_api_key() -> str:
@@ -23,13 +26,15 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def _get_gemini(model: str = GEMINI_MODEL):
-    import local_genai as genai
-    _c = genai.Client(api_key=_get_api_key())
-
+def _get_gemini(tier: str = gemini.SMART):
+    """Writing and fixing code is the reasoning tier; a 60s deadline because a
+    whole file can come back."""
     class _W:
         def generate_content(self, contents):
-            return _c.models.generate_content(model=model, contents=contents)
+            resp = gemini.call(contents, tier=tier, timeout_ms=60000)
+            if resp is None:
+                raise RuntimeError("every Gemini model on the ladder failed")
+            return resp
 
     return _W()
 
@@ -115,10 +120,10 @@ _VALID_INTENTS = {"write", "edit", "explain", "run", "build", "screen_debug", "o
 
 def _detect_intent(description: str, file_path: str, code: str) -> str:
     """
-    Dil bağımsız niyet tespiti — sabit anahtar kelime listesi YOK.
-    Kullanıcı hangi dilde konuşursa konuşsun, açıklama Gemini'ye
-    sınıflandırtılır. API'ye ulaşılamazsa dile bakmayan yapısal
-    ipuçlarına (dosya diskte var mı, kod verilmiş mi) düşülür.
+    Language-independent intent detection — NO fixed keyword list.
+    Whatever language the user speaks, the description is classified by
+    Gemini. If the API is unreachable, it falls back to language-agnostic
+    structural hints (does the file exist on disk, was code provided).
     """
     desc        = (description or "").strip()
     file_exists = bool(file_path) and Path(file_path).exists()
@@ -152,7 +157,7 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
         except Exception as e:
             print(f"[Code] Intent classification failed ({e}) — structural fallback")
 
-    # Yapısal geri dönüş — hiçbir dile bağlı değil
+    # Structural fallback — not tied to any language
     if file_exists:
         return "edit" if desc else "explain"
     if code:
@@ -456,10 +461,7 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
             print(f"[Code] ⚠️ Could not read file: {err}")
 
     try:
-        import local_genai as genai
-        # # from google.genai import types
-
-        client = genai.Client(api_key=_get_api_key())
+        from google.genai import types
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)
@@ -487,12 +489,11 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             analysis_prompt,
         ]
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-        )
+        response = gemini.call(contents, tier=gemini.SMART, timeout_ms=45_000)
+        if response is None:
+            return "Sir, I couldn't reach Gemini to analyse that screenshot."
 
-        analysis = response.text.strip()
+        analysis = (response.text or "").strip()
         print(f"[Code] ✅ Screen analysis complete")
 
         try:
@@ -582,3 +583,51 @@ def code_helper(
 
     else:
         return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "code_helper",
+    "description": "Writes, edits, explains, runs, or builds code files.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "write | edit | explain | run | build | auto (default: auto)"
+            },
+            "description": {
+                "type": "STRING",
+                "description": "What the code should do or what change to make"
+            },
+            "language": {
+                "type": "STRING",
+                "description": "Programming language (default: python)"
+            },
+            "output_path": {
+                "type": "STRING",
+                "description": "Where to save the file"
+            },
+            "file_path": {
+                "type": "STRING",
+                "description": "Path to existing file for edit/explain/run/build"
+            },
+            "code": {
+                "type": "STRING",
+                "description": "Raw code string for explain"
+            },
+            "args": {
+                "type": "STRING",
+                "description": "CLI arguments for run/build"
+            },
+            "timeout": {
+                "type": "INTEGER",
+                "description": "Execution timeout in seconds (default: 30)"
+            }
+        },
+        "required": [
+            "action"
+        ]
+    },
+    "handler": code_helper,
+}
