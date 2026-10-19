@@ -83,10 +83,8 @@ PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
-# Tiny Whisper is considerably lighter on CPU than the base model and is
-# sufficient for short Spanish commands. Set to "base" only if accuracy is
-# more important than response time.
-STT_MODEL_NAME      = "tiny"
+# Base Whisper is a better accuracy/speed balance for Spanish speech.
+STT_MODEL_NAME      = "base"
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
@@ -923,11 +921,17 @@ class JarvisLive:
                 )
 
         try:
+            input_device = sd.default.device[0]
+            device_info = sd.query_devices(input_device, "input")
+            self.ui.write_log(
+                f"SYS: Micrófono: {device_info.get('name', 'predeterminado')}"
+            )
             with sd.InputStream(
                 samplerate=SEND_SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
                 blocksize=CHUNK_SIZE,
+                device=input_device,
                 callback=callback,
             ):
                 print("[JARVIS] 🎤 Mic stream open")
@@ -963,12 +967,14 @@ class JarvisLive:
             raw = bytes(buffer)
             buffer.clear()
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            if samples.size == 0 or float(np.max(np.abs(samples))) < 0.012:
+            if samples.size == 0 or float(np.max(np.abs(samples))) < 0.02:
                 continue
             try:
                 segments, _ = await asyncio.to_thread(
                     self._stt_model.transcribe, samples, language="es",
-                    beam_size=1, vad_filter=True, condition_on_previous_text=False
+                    beam_size=1, vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 350},
+                    condition_on_previous_text=False
                 )
                 text = " ".join(seg.text.strip() for seg in segments).strip()
                 text = _clean_transcript(text)
