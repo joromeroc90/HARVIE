@@ -69,7 +69,6 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.proactive         import ProactiveEngine
 from actions.web_search        import _news as _fetch_news_sync
-from memory.config_manager     import get_brief_enabled
 
 
 def get_base_dir():
@@ -1388,10 +1387,8 @@ class JarvisLive:
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
-                    # Morning briefing — fires once per process launch (if enabled)
-                    if not self._briefing_sent and get_brief_enabled():
-                        self._briefing_sent = True
-                        tg.create_task(self._send_startup_briefing())
+                    # Startup briefing/news is disabled. Web searches happen only
+                    # when the user explicitly asks for them.
 
             except KeyboardInterrupt:
                 raise
