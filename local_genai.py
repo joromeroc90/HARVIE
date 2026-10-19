@@ -106,13 +106,14 @@ class LocalLiveSession:
         self._history.append({"role": "user", "content": user_text})
         system = getattr(self.config, "system_instruction", "") or ""
         messages = ([{"role": "system", "content": str(system)}]
-                    if system else []) + self._history[-12:]
+                    if system else []) + self._history[-6:]
 
         def _ask_ollama():
             req = urllib.request.Request(
                 "http://127.0.0.1:11434/api/chat",
                 data=json.dumps({"model": "llama3.2", "messages": messages,
-                                 "stream": False}).encode("utf-8"),
+                                 "stream": False,
+                                 "options": {"num_predict": 160, "temperature": 0.35}}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=120) as response:
