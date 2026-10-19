@@ -646,11 +646,20 @@ class JarvisLive:
             else:
                 # Windows OneCore includes the natural Spanish male voice Raul,
                 # but some pyttsx3 versions do not enumerate it automatically.
-                raul_id = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens\MSTTS_V110_esMX_RaulMM"
                 try:
-                    engine.setProperty("voice", raul_id)
+                    import win32com.client
+                    sapi = win32com.client.Dispatch("SAPI.SpVoice")
+                    for idx in range(sapi.GetVoices().Count):
+                        candidate = sapi.GetVoices().Item(idx)
+                        if "raul" in candidate.GetDescription().lower():
+                            sapi.Voice = candidate
+                            sapi.Rate = 0
+                            sapi.Volume = 100
+                            sapi.Speak(text)
+                            return
                 except Exception:
-                    print("[Voice] No se pudo activar la voz española Raul.")
+                    pass
+                print("[Voice] No se pudo activar la voz española Raul.")
             engine.setProperty("rate", 165)
             engine.setProperty("volume", 1.0)
             engine.say(text)
