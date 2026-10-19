@@ -2481,7 +2481,6 @@ class JarvisLive:
                     tg.create_task(self._play_audio())
                     # Resource and news monitors stay disabled by default.
                     # They are available only through an explicit user request.
-                    tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
@@ -2496,9 +2495,8 @@ class JarvisLive:
                     # Morning briefing — fires once per process launch (if enabled).
                     # Skipped in wake-word mode: it comes up asleep, and a briefing
                     # would mean talking while "asleep".
-                    if not self._briefing_sent and get_brief_enabled() and self._awake:
-                        self._briefing_sent = True
-                        tg.create_task(self._send_startup_briefing())
+                    # Automatic briefing/news is disabled. Web searches happen
+                    # only after an explicit user request.
 
             except KeyboardInterrupt:
                 raise
