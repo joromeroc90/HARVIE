@@ -638,23 +638,19 @@ class JarvisLive:
                     self._tts_engine = pyttsx3.init()
                 engine = self._tts_engine
             voices = engine.getProperty("voices") or []
-            male_voice = None
+            spanish_voice = None
             for voice in voices:
                 desc = f"{getattr(voice, 'name', '')} {getattr(voice, 'id', '')}".lower()
-                if any(name in desc for name in ("david", "mark", "jorge", "george", "male")):
-                    male_voice = voice
+                if "sabina" in desc or "es-mx" in desc or "spanish" in desc:
+                    spanish_voice = voice
                     break
-            if male_voice is not None:
-                engine.setProperty("voice", male_voice.id)
+            if spanish_voice is not None:
+                engine.setProperty("voice", spanish_voice.id)
             else:
-                # Windows OneCore includes the natural Spanish male voice Raul,
-                # but some pyttsx3 versions do not enumerate it automatically.
                 try:
                     import win32com.client
                     sapi = win32com.client.Dispatch("SAPI.SpVoice")
-                    # Prefer an English male voice so Spanish is pronounced
-                    # with an American accent, as requested by the user.
-                    preferred = ("david", "mark", "raul")
+                    preferred = ("sabina", "español", "spanish")
                     selected = None
                     for wanted in preferred:
                         for idx in range(sapi.GetVoices().Count):
