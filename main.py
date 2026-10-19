@@ -83,6 +83,10 @@ PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
+# Tiny Whisper is considerably lighter on CPU than the base model and is
+# sufficient for short Spanish commands. Set to "base" only if accuracy is
+# more important than response time.
+STT_MODEL_NAME      = "tiny"
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
@@ -914,7 +918,7 @@ class JarvisLive:
             from faster_whisper import WhisperModel
             self.ui.write_log("SYS: Cargando Whisper local...")
             self._stt_model = await asyncio.to_thread(
-                WhisperModel, "base", device="cpu", compute_type="int8"
+                WhisperModel, STT_MODEL_NAME, device="cpu", compute_type="int8"
             )
             self.ui.write_log("SYS: Escucha por voz activa en español.")
         except Exception as exc:
@@ -1383,7 +1387,6 @@ class JarvisLive:
                     tg.create_task(self._transcribe_local_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
-                    tg.create_task(self._run_proactive_mode())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
