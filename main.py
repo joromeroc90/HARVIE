@@ -34,6 +34,13 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 
+# Windows consoles may default to cp1252; keep diagnostic messages from
+# crashing the assistant when they contain emoji or accented characters.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import sounddevice as sd
 import local_genai as genai
 from local_genai import types
