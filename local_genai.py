@@ -1,5 +1,7 @@
 import asyncio
 import json
+import unicodedata
+from datetime import datetime
 import urllib.request
 
 # ====================================================================
@@ -102,6 +104,22 @@ class LocalLiveSession:
                       if isinstance(p, dict) and p.get("text")]
         user_text = "\n".join(text_parts).strip()
         if not user_text:
+            return
+        # Common voice command: answer locally and immediately, without
+        # waiting for Ollama to generate a response.
+        normalized = "".join(
+            c for c in unicodedata.normalize("NFD", user_text.lower())
+            if unicodedata.category(c) != "Mn"
+        )
+        if any(phrase in normalized for phrase in ("que hora es", "dime la hora", "hora actual")):
+            answer = f"Son las {datetime.now().strftime('%H:%M')}, jefe."
+            self._history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": answer},
+            ])
+            await self._receive_queue.put(_LiveResponse(
+                server_content=_ServerContent(output_text=answer, turn_complete=True)
+            ))
             return
         self._history.append({"role": "user", "content": user_text})
         system = getattr(self.config, "system_instruction", "") or ""
