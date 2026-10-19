@@ -67,7 +67,6 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
-from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import get_brief_enabled
@@ -156,18 +155,6 @@ TOOL_DECLARATIONS = [
                 "aspect": {"type": "STRING", "description": "Comparison aspect: price | specs | reviews | features"},
             },
             "required": ["query"]
-        }
-    },
-    {
-        "name": "system_status",
-        "description": (
-            "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
-            "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {},
         }
     },
     {
@@ -572,7 +559,6 @@ class JarvisLive:
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
-        self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._stt_queue = queue.Queue(maxsize=80)
@@ -858,10 +844,6 @@ class JarvisLive:
             elif name == "flight_finder":
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
-
-            elif name == "system_status":
-                r = await loop.run_in_executor(None, get_system_status)
-                result = str(r)
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
@@ -1402,7 +1384,6 @@ class JarvisLive:
                     tg.create_task(self._transcribe_local_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
-                    tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_proactive_mode())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())

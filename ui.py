@@ -335,7 +335,8 @@ class _SysMetrics:
             }
 
 
-_metrics = _SysMetrics()
+# Resource metrics are intentionally disabled for privacy and lower CPU use.
+_metrics = None
 
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
@@ -1865,7 +1866,7 @@ class MainWindow(QMainWindow):
         # Metrik güncelleme timer'ı
         self._metric_tmr = QTimer(self)
         self._metric_tmr.timeout.connect(self._update_metrics)
-        self._metric_tmr.start(2000)
+        # Resource monitoring is disabled to keep Harvie lightweight and private.
         self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)
@@ -2392,6 +2393,14 @@ class MainWindow(QMainWindow):
             self._position_quick_drawer()
 
     def _update_metrics(self):
+        # Do not inspect CPU, RAM, processes, network, GPU or temperatures.
+        for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
+                    self._bar_gpu, self._bar_tmp]:
+            bar.set_value(0, "N/A")
+        self._uptime_lbl.setText("UP  --:--")
+        self._proc_lbl.setText("PROC  --")
+        return
+
         snap = _metrics.snapshot()
 
         # CPU
