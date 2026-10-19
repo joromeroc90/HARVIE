@@ -29,6 +29,8 @@ import json
 import sys
 import traceback
 import unicodedata
+import queue
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 
@@ -566,6 +568,8 @@ class JarvisLive:
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
+        self._stt_queue = queue.Queue(maxsize=80)
+        self._stt_model = None
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -892,6 +896,10 @@ class JarvisLive:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                try:
+                    self._stt_queue.put_nowait(data)
+                except queue.Full:
+                    pass
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
@@ -911,6 +919,50 @@ class JarvisLive:
         except Exception as e:
             print(f"[JARVIS] ❌ Mic: {e}")
             raise
+
+    async def _transcribe_local_audio(self):
+        """Offline Whisper transcription loop; audio never leaves this computer."""
+        try:
+            from faster_whisper import WhisperModel
+            self.ui.write_log("SYS: Cargando Whisper local...")
+            self._stt_model = await asyncio.to_thread(
+                WhisperModel, "base", device="cpu", compute_type="int8"
+            )
+            self.ui.write_log("SYS: Escucha por voz activa en español.")
+        except Exception as exc:
+            self.ui.write_log(f"ERR: Whisper no disponible — {exc}")
+            return
+
+        sample_rate = SEND_SAMPLE_RATE
+        buffer = bytearray()
+        while True:
+            try:
+                chunk = await asyncio.to_thread(self._stt_queue.get, True, 1.0)
+                buffer.extend(chunk)
+            except queue.Empty:
+                continue
+            if len(buffer) < sample_rate * 2 * 2:  # at least 2 seconds
+                continue
+            raw = bytes(buffer)
+            buffer.clear()
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if samples.size == 0 or float(np.max(np.abs(samples))) < 0.012:
+                continue
+            try:
+                segments, _ = await asyncio.to_thread(
+                    self._stt_model.transcribe, samples, language="es",
+                    beam_size=1, vad_filter=True, condition_on_previous_text=False
+                )
+                text = " ".join(seg.text.strip() for seg in segments).strip()
+                text = _clean_transcript(text)
+                if text and self.session and not self._is_speaking:
+                    self._last_user_speech = time.monotonic()
+                    self.ui.write_log(f"You: {text}")
+                    await self.session.send_client_content(
+                        turns={"parts": [{"text": text}]}, turn_complete=True
+                    )
+            except Exception as exc:
+                print(f"[STT] Transcription error: {exc}")
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
@@ -1340,6 +1392,7 @@ class JarvisLive:
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
+                    tg.create_task(self._transcribe_local_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
