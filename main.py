@@ -685,6 +685,7 @@ class JarvisLive:
             f"Your name is {self._asst_name}. "
             f"Always refer to yourself as {self._asst_name}.\n"
             f"{_addr}\n\n"
+            "LANGUAGE: Always respond and speak in Spanish. Never switch languages automatically.\n\n"
         )
 
         parts = [time_ctx, identity_ctx]
